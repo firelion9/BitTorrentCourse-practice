@@ -9,7 +9,7 @@ class TorrentMetadata:
     def __init__(
             self, 
             info_hash: bytes,
-            trackers: list[str], piece_len: int, pieces: list[bytes], files: list[tuple[int, pathlib.Path]], 
+            trackers: list[list[str]], piece_len: int, pieces: list[bytes], files: list[tuple[int, pathlib.Path]], 
             creation_date: Optional[int], comment: Optional[str], created_by: Optional[str]
     ) -> None:
         self.info_hash = info_hash
@@ -55,7 +55,7 @@ created_by={self.created_by}
         #     raise RuntimeError("Unsupported torrent file: expect single `info` key")
         # info_hash=hashlib.sha1(data[info_marks[0][0]:info_marks[1][0]]).digest()
         
-        trackers = [get_field(metafile, "announce", bytes).decode()]
+        trackers = [[get_field(metafile, "announce", bytes).decode()]]
         # Добавите announce-list. Помните, что это *список списков*
         trackers.extend(...)
 
@@ -74,7 +74,7 @@ created_by={self.created_by}
             #  - length --- длина файла
             #  - path --- путь в виде списка элементов пути. 
             #             То есть root/some/path/to/file будет записан как
-            #             ["some", "path", "to", "file"], а root пойдёт в name
+            #             ["some", "path", "to", "file"], а "root" пойдёт в name
             
             # fs = [(..., pathlib.Path(name, *map(bytes.decode, ...)))
             #         for f in ...]
@@ -90,3 +90,10 @@ created_by={self.created_by}
             comment=map_optional(bytes.decode, ...), # "comment"
             created_by=map_optional(bytes.decode, ...), # "created by"
         )
+    
+    
+    # Домашнее задание 2: напишите энкодер .torrent-файла.
+    # Мы можете пока считать, что мы работаем исключительно с single-file раздачами
+    def encode(self) -> bytes:
+        return ...
+

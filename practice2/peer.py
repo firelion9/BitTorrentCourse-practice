@@ -98,6 +98,7 @@ class Interested(BtCommunicationMessage):
     def encode_body(self) -> bytes:
         return struct.pack("B", Interested.tag())
 
+
 @dataclass
 class NotInterested(BtCommunicationMessage):
     @classmethod
@@ -110,6 +111,7 @@ class NotInterested(BtCommunicationMessage):
 
     def encode_body(self) -> bytes:
         return struct.pack("B", NotInterested.tag())
+
 
 @dataclass
 class Have(BtCommunicationMessage):
@@ -126,6 +128,7 @@ class Have(BtCommunicationMessage):
     def encode_body(self) -> bytes:
         return struct.pack(">BI", Have.tag(), self.piece_idx)
 
+
 @dataclass
 class Bitfield(BtCommunicationMessage):
     bitfield: Bitset
@@ -139,7 +142,9 @@ class Bitfield(BtCommunicationMessage):
         return Bitfield(Bitset(data))  # type: ignore
 
     def encode_body(self) -> bytes:
-        return struct.pack(f"B{len(self.bitfield.data)}s", Bitfield.tag(), self.bitfield.data)
+        return struct.pack(
+            f"B{len(self.bitfield.data)}s", Bitfield.tag(), self.bitfield.data
+        )
 
 
 @dataclass
@@ -155,12 +160,10 @@ class Request(BtCommunicationMessage):
     @classmethod
     def decode_body(cls: Type[_T], data: bytes) -> _T:
         index, begin, length = struct.unpack(">III", data)
-        return Request(index, begin, length) # type: ignore
+        return Request(index, begin, length)  # type: ignore
 
     def encode_body(self) -> bytes:
-        return struct.pack(
-            ">BIII", Request.tag(), self.index, self.begin, self.length
-        )
+        return struct.pack(">BIII", Request.tag(), self.index, self.begin, self.length)
 
 
 @dataclass
@@ -176,12 +179,11 @@ class Piece(BtCommunicationMessage):
     @classmethod
     def decode_body(cls: Type[_T], data: bytes) -> _T:
         index, begin, block = struct.unpack(f">II{len(data) - 8}s", data)
-        return Piece(index, begin, block) # type: ignore
+        return Piece(index, begin, block)  # type: ignore
 
     def encode_body(self) -> bytes:
-        return struct.pack(
-            ">BIIs", Request.tag(), self.index, self.begin, self.block
-        )
+        return struct.pack(">BIIs", Request.tag(), self.index, self.begin, self.block)
+
 
 @dataclass
 class Cancel(BtCommunicationMessage):
@@ -196,12 +198,10 @@ class Cancel(BtCommunicationMessage):
     @classmethod
     def decode_body(cls: Type[_T], data: bytes) -> _T:
         index, begin, length = struct.unpack(">III", data)
-        return Cancel(index, begin, length) # type: ignore
+        return Cancel(index, begin, length)  # type: ignore
 
     def encode_body(self) -> bytes:
-        return struct.pack(
-            ">BIII", Cancel.tag(), self.index, self.begin, self.length
-        )
+        return struct.pack(">BIII", Cancel.tag(), self.index, self.begin, self.length)
 
 
 def _decode_msg(data: bytes) -> BtCommunicationMessage:
@@ -210,30 +210,48 @@ def _decode_msg(data: bytes) -> BtCommunicationMessage:
 
     tag = data[0]
 
-    msg_clses = [Choke, Unchoke, Interested, NotInterested, Have,  Bitfield, Request, Piece, Cancel]
+    msg_clses = [
+        Choke,
+        Unchoke,
+        Interested,
+        NotInterested,
+        Have,
+        Bitfield,
+        Request,
+        Piece,
+        Cancel,
+    ]
 
     for msg_cls in msg_clses:
         if tag == msg_cls.tag():
             return msg_cls.decode_body(data[1:])
 
     raise ParseError(f"Illegal message id {tag}")
-    
+
+
 class Peer:
-    def __init__(self, out_dir: pathlib.Path, metadata: metafile.TorrentMetadata, id: bytes) -> None:
+    def __init__(
+        self, out_dir: pathlib.Path, metadata: metafile.TorrentMetadata, id: bytes
+    ) -> None:
         now = int(time.time())
 
         self.out_dir = out_dir
         self.metadata = metadata
         self.id = id
-        self.trackers: list[tuple[str, int, int]] = [
-            (tr, now - _MIN_ANNOUNCE_INTERVAL - 1, now)
-            for tr in metadata.trackers
-            if tr.startswith("http")
+        self.trackers: list[list[tuple[str, int, int]]] = [
+            [
+                (tr, now - _MIN_ANNOUNCE_INTERVAL - 1, now)
+                for tr in trs
+                if tr.startswith("http")
+            ]
+            for trs in metadata.trackers
         ]
         self.known_peers: set[tuple[str, int]] = set()
 
     def announce_peers(self, event: str | None = None):
-        self.trackers = [self.__announce_at(tracker) for tracker in self.trackers if tracker[0].startswith("http")]
+        self.trackers = [
+            [self.__announce_at(tracker) for tracker in trs] for trs in self.trackers
+        ]
 
     def __announce_at(
         self, tracker: tuple[str, int, int], event: str | None = None
@@ -249,7 +267,7 @@ class Peer:
             "downloaded": str(0),
             "left": str(self.metadata.piece_len * len(self.metadata.pieces)),
             # TODO задание 5
-            ...: ...
+            ...: ...,
         }
         if not event is None:
             params["event"] = event
@@ -259,7 +277,7 @@ class Peer:
             response = parse_bencoded(ParserInput(res.content))
             # TODO задание 5
             interval = ...
-            peers = ... # get_field(response, "peers", list | bytes)
+            peers = ...  # get_field(response, "peers", list | bytes)
 
             with self.peers_lock:
                 for p in peers:
@@ -269,13 +287,14 @@ class Peer:
 
         return (tracker[0], now, now + _FAILURE_ANNOUNCE_INTERVAL)
 
+
 if __name__ == "__main__":
     # Задание 5: сделайте анонс на трекер на сервере.
-    # В data/practice1.torrent есть пример торрент-файла, в котором уже прописан нужный трекер 
-    # В качестве id укажите 
+    # В data/practice1.torrent есть пример торрент-файла, в котором уже прописан нужный трекер
+    # В качестве id укажите
     meta = metafile.TorrentMetadata.parse(
         pathlib.Path("data/practice1.torrent").read_bytes()
     )
 
-    peer = Peer(pathlib.Path("data"), meta, id=b"-qB5100-.fsanoifneawolcasdaw"[0:20]) 
+    peer = Peer(pathlib.Path("data"), meta, id=b"-qB5100-.fsanoifneawolcasdaw"[0:20])
     peer.announce_peers()

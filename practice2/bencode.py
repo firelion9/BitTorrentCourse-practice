@@ -115,3 +115,21 @@ def parse_bencoded(inp: ParserInput, str_parse_fn: Callable[[ParserInput], __T] 
         return None
     else:
         raise BencodeParseError(f"Unknown tag `{t}`")
+
+
+# Домашнее задание 1: напишите энкодер bencode.
+# Для проверки работы можно использовать выражения вида x == parse_bencoded(to_bencoded(x, str_parse_fn=_parse_str))
+def to_bencoded(obj: dict|list|str|bytes|int) -> bytes:
+    if isinstance(obj, int):
+        return ...
+    elif isinstance(obj, str):
+        return ...
+    elif isinstance(obj, bytes):
+        return ...
+    elif isinstance(obj, dict):
+        # Не забудьте про сортировку ключей!
+        return ...
+    elif isinstance(obj, list):
+        return ...
+    else:
+        raise RuntimeError(f"Unsupported type `{type(obj)}`")
