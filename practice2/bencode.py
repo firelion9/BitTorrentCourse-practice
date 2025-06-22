@@ -48,7 +48,7 @@ class ParserInput:
 class BencodeParseError(BaseException):
     ...
 
-# Задание 1: реализуйте парсер bencode.
+# Задание 2.1: реализуйте парсер bencode.
 # parse_bencoded уже написана, вам нужно реализовать только парсинг 
 # - чисел
 # - строк
@@ -71,30 +71,30 @@ class BencodeParseError(BaseException):
 # В __parse_list и __parse_dict есть параметр str_parse_fn, 
 # который надо передавать в парсеры дочерних элементов (parse_bencoded).
 
-# Задание 2
+# Задание 2.2
 # Проверьте, что ключи в словарях лексикографически упорядочены и не повторяются
 # Подсказка: сравните соседние ключи 
 
-# Задание 3 
+# Задание 2.3 
 # нам будет очень надо посмотреть, в каком месте начинается и кончается 
 # поле info в .torrent файле. Поэтому мы вставим в парсер костыль.
 # Перед началом парсинга значения в каждой паре ключ-значение в словаре
 # вызовите inp.add_mark(("start", key)), а после --- inp.add_mark(("end", key))
 
 def __parse_int(inp: ParserInput, end_char: str = 'e') -> int:
-    raise NotImplemented("__parse_int")
+    return ...
 
 def _parse_str(inp: ParserInput) -> str:
-    raise NotImplemented("_parse_str")
+    return ...
 
 def _parse_byte_str(inp: ParserInput) -> bytes:
-    raise NotImplemented("_parse_byte_str")
+    return ...
 
 def __parse_list(inp: ParserInput, str_parse_fn: Callable[[ParserInput], __T] = _parse_byte_str) -> list[Any]:
-    raise NotImplemented("__parse_list")
+    return ...
 
 def __parse_dict(inp: ParserInput, str_parse_fn: Callable[[ParserInput], __T] = _parse_byte_str) -> dict[str, Any]:
-    raise NotImplemented("__parse_dict")
+    return ...
 
 def parse_bencoded(inp: ParserInput, str_parse_fn: Callable[[ParserInput], __T] = _parse_byte_str) -> Any:
     t = inp.peek_char()
@@ -117,7 +117,7 @@ def parse_bencoded(inp: ParserInput, str_parse_fn: Callable[[ParserInput], __T] 
         raise BencodeParseError(f"Unknown tag `{t}`")
 
 
-# Домашнее задание 1: напишите энкодер bencode.
+# Домашнее задание 2.1: напишите энкодер bencode.
 # Для проверки работы можно использовать выражения вида x == parse_bencoded(to_bencoded(x, str_parse_fn=_parse_str))
 def to_bencoded(obj: dict|list|str|bytes|int) -> bytes:
     if isinstance(obj, int):

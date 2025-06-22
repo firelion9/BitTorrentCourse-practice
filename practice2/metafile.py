@@ -5,6 +5,8 @@ import pathlib
 import hashlib
 
 
+_DEFAULT_PIECE_LEN = 256 * 1024
+
 class TorrentMetadata:
     def __init__(
             self, 
@@ -42,7 +44,7 @@ created_by={self.created_by}
         inp.require_consumed()
         info_marks = [(off, tag) for (off, (tag, key)) in inp.marks if key == "info"]
 
-        # Задание 4: распарсите .torrent файл.
+        # Задание 2.4: распарсите .torrent файл.
         # Вам пригодятся функции из util:
         # get_field(dict, field, type) --- получить поле с указным типом, например get_field(info, "name", bytes)
         #                                  Никаких преобразований типов не происходит! Все строки у нас на  самом деле bytes
@@ -92,8 +94,43 @@ created_by={self.created_by}
         )
     
     
-    # Домашнее задание 2: напишите энкодер .torrent-файла.
+    # Домашнее задание 2.2: напишите энкодер .torrent-файла.
     # Мы можете пока считать, что мы работаем исключительно с single-file раздачами
     def encode(self) -> bytes:
         return ...
+    
+    # Домашнее задание 3.1: Создайте TorrentMetadata для раздачи из 1 указанного файла.
+    # Основная задача тут --- распилить файл на части и посчитать их хеши, а затем info-хеш.
+    # Все остальные поля класса берутся из входных параметров 
+    # Мы считаем, что file --- это *файл* (а не папка)
+    @staticmethod
+    def make_metadata(
+            self,
+            trackers: list[list[str]],
+            file: pathlib.Path, 
+            file_name: None,
+            piece_len: int = _DEFAULT_PIECE_LEN,
+            creation_date: Optional[int] = None,
+            comment: Optional[str] = None,
+            created_by: Optional[str] = None,
+    ) -> 'TorrentMetadata':
+        if file_name is None:
+            file_name = file.name
+        
+        file_length = file.stat().st_size
 
+        pieces = []
+
+        # TODO
+
+        # Как посчитать инфо-хеш, если у нас ещё нет .torrent файла?
+        # Нужно закодировать поле info и отправить его в to_bencoded, а потом посчитать от этого хеш.
+        # Мы работаем с однофайловой раздачей, поэтому это довольно просто:
+        info_hash = hashlib.sha1(to_bencoded({
+            "length": file_length,
+            "name": file_name,
+            "piece length": piece_len,
+            "pieces": pieces
+        })).digest()
+
+        return TorrentMetadata(...)
