@@ -45,10 +45,17 @@ class Bitset:
     def __init__(self, data: bytes) -> None:
         ...
 
+    @overload
+    def __init__(self, data: 'Bitset') -> None:
+        ...
+
     def __init__(self, data_or_size: bytes|int) -> None:
         if isinstance(data_or_size, int):
             self.size = data_or_size
             self.data = bytearray((data_or_size + 7) // 8)
+        elif isinstance(data_or_size, Bitset):
+            self.size = data_or_size.size
+            self.data = bytearray(data_or_size.data)
         else:
             self.size = len(data_or_size) * 8
             self.data = bytearray(data_or_size)

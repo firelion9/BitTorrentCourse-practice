@@ -17,6 +17,8 @@ from collections import deque
 import metafile
 from bencode import *
 from util import *
+import secrets
+import random
 
 _SOCK_TIMEOUT = 30
 _MIN_ANNOUNCE_INTERVAL = 30
@@ -236,7 +238,7 @@ class PeerConnection:
     def __init__(
         self,
         my_id: bytes,
-        info_hash: bytes,
+        metadata: metafile.TorrentMetadata,
         sock: socket.socket,
         is_initiator: bool,
         handle_piece: Callable[[Piece], None],
@@ -244,7 +246,7 @@ class PeerConnection:
         on_disconnected: Callable[['PeerConnection', tuple[str, int]], None] = (lambda x, y: ...),
     ) -> None:
         self.my_id = my_id
-        self.info_hash = info_hash
+        self.info_hash = metadata.info_hash
         self.sock = sock
         self.handle_piece = handle_piece
         self.handle_request = handle_request
@@ -256,12 +258,13 @@ class PeerConnection:
         self.peer_choking = True
         self.peer_interested = False
 
-        self.peer_bitfield = Bitset(0)
+        self.peer_bitfield = Bitset(len(metadata.pieces))
         self.download_records = deque()
         self.window_downloaded = 0
-        self.data_lock = threading.Lock()
+        self.data_lock = threading.RLock()
         self.send_lock = threading.Lock()
         self.request_cond = threading.Condition(self.data_lock)
+        self.is_closing = False
         
         self.peer_requests: set[Request] = set()
 
@@ -353,9 +356,16 @@ class PeerConnection:
             self.am_interested = False
 
     def close(self):
+        with self.data_lock:
+            if self.is_closing:
+                return
+            self.is_closing = True
+        
         self.sock.shutdown(socket.SHUT_RDWR)
         self.sock.close()
         self.receive_thread.join()
+        with self.data_lock:
+            self.request_cond.notify_all()
         self.send_thread.join()
 
     def _recv_bytes(self, cnt: int) -> bytes:
@@ -372,8 +382,10 @@ class PeerConnection:
         try:
             while True:
                 with self.data_lock:
-                    while len(self.peer_requests) == 0:
+                    while len(self.peer_requests) == 0 and self.receive_thread.is_alive():
                         self.request_cond.wait()
+                    if len(self.peer_requests) == 0:
+                        return
                     request = self.__pop_request()
                     data = self.handle_request(request)
                 
@@ -385,7 +397,9 @@ class PeerConnection:
             try: 
                 self.sock.close()
             except ...: ...
-            self.on_disconnected()
+            with self.data_lock:
+                if not self.is_closing:
+                    self.on_disconnected()
 
     def _receive_loop(self):
         try:
@@ -422,25 +436,41 @@ class PeerConnection:
             try: 
                 self.sock.close()
             except ...: ...
-            self.on_disconnected()
+            with self.data_lock:
+                if not self.is_closing:
+                    self.on_disconnected()
 
 
     def _on_piece_received(self, piece: Piece) -> None:
         self.handle_piece(self.peer_id, piece)
 
+    def __pop_request(self) -> Optional[Request]:
+        if len(self.peer_requests) == 0:
+            return None
+        else:
+            return self.peer_requests.pop()
+        
     def __send_msg(self, msg: BtCommunicationMessage) -> None:
         self.sock.sendall(msg.encode())
 
 
 class Peer:
     def __init__(
-        self, out_dir: pathlib.Path, metadata: metafile.TorrentMetadata, id: bytes
+        self,
+        out_dir: pathlib.Path,
+        metadata: metafile.TorrentMetadata, 
+        id: bytes,
+        port: int = 0,
+        on_sub_piece: Callable[[Any, int], None] = (lambda x: ...),
     ) -> None:
         now = int(time.time())
 
         self.out_dir = out_dir
         self.metadata = metadata
-        self.id = id
+        self.id = id if isinstance(id, bytes) else id.encode()
+        self.on_sub_piece = on_sub_piece
+        self.listen_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.listen_socket.bind(("", port))
         self.trackers: list[list[tuple[str, int, int]]] = [
             [
                 (tr, now - _MIN_ANNOUNCE_INTERVAL - 1, now)
@@ -449,26 +479,46 @@ class Peer:
             ]
             for trs in metadata.trackers
         ]
+        self.known_peers: set[tuple[str, int]] = set()
+        self.peers: dict[tuple[str, int], PeerConnection] = dict()
+
+        self.peers_lock = threading.Lock()
+        self.file_lock = threading.Lock()
 
         out_dir.mkdir(exist_ok=True)
-        self.data_file = (out_dir / (metadata.info_hash.hex() + ".!t")).open("a+b")
+        self.data_file = self.__data_file(out_dir, metadata).open("a+b")
         self.data_file_mmap = mmap(
             self.data_file.fileno(), self.metadata.total_len, access=ACCESS_WRITE
         )
         self.bitfield = Bitset(len(metadata.pieces))
-
-        self.known_peers: set[tuple[str, int]] = set()
-
-        self.peers: dict[tuple[str, int], PeerConnection] = dict()
-        self.peers_lock = threading.Lock()
-
+        self.sub_pieces = Bitset(
+            (metadata.total_len + _REQUEST_SIZE - 1) // _REQUEST_SIZE
+        )
+        self.sub_pieces_per_piece = (
+            len(self.sub_pieces) + len(metadata.pieces) - 1
+        ) // len(metadata.pieces)
         self.executor = concurrent.futures.ThreadPoolExecutor()
+        self.accept_thread = threading.Thread(target=self.__accept_job)
+
+        self.check_data()
+
+        self.accept_thread.start()
 
     def announce_peers(self, event: str | None = None):
         self.trackers = [
             [self.__announce_at(tracker) for tracker in trs] for trs in self.trackers
         ]
 
+    @staticmethod
+    def __data_file(out_dir: pathlib.Path, metadata: metafile.TorrentMetadata) -> pathlib.Path:
+        if len(metadata.files) == 1:
+            file = metadata.files[0][1]
+            if len(file.parts) == 1 and file.parts[0] not in ['.', '..']:
+                return out_dir / file.parts[0]
+            
+        return out_dir / (metadata.info_hash.hex() + ".!t")
+       
+    # TODO: Не забудьте поменять порт на str(self.listen_socket.getsockname()[1])
     def __announce_at(
         self, tracker: tuple[str, int, int], event: str | None = None
     ) -> tuple[str, int, int]:
@@ -477,12 +527,11 @@ class Peer:
             return tracker
 
         params = {
-            # эти 4 параметра пока оставим такими
-            "port": str(0),
+            "port": str(self.listen_socket.getsockname()[1]),
             "uploaded": str(0),
             "downloaded": str(0),
             "left": str(self.metadata.piece_len * len(self.metadata.pieces)),
-            # TODO задание 5
+            # TODO задание 2.5
             ...: ...,
         }
         if not event is None:
@@ -495,7 +544,7 @@ class Peer:
             )
         if res.ok:
             response = parse_bencoded(ParserInput(res.content))
-            # TODO задание 5
+            # TODO задание 2.5
             interval = ...
             peers = ...  # get_field(response, "peers", list | bytes)
 
@@ -504,7 +553,8 @@ class Peer:
                     self.known_peers.add(p)
 
             return (tracker[0], now, now + interval)
-
+        else:
+            print(res, res.content)
         return (tracker[0], now, now + _FAILURE_ANNOUNCE_INTERVAL)
 
     def check_data(self) -> None:
@@ -515,13 +565,79 @@ class Peer:
         ...
 
     def _handle_piece(self, piece: Piece) -> None:
-        # TODO(firelion)
-        ...
+        if (
+            piece.begin % _REQUEST_SIZE != 0
+            or len(piece.block) != _REQUEST_SIZE
+            and (
+                piece.index * self.sub_pieces_per_piece + piece.begin // _REQUEST_SIZE
+                != len(self.sub_pieces) - 1
+            )
+        ):
+            warning(RuntimeWarning(f"Unaligned block {piece}"))
+            return
+        with self.file_lock:
+            idx = piece.index * self.sub_pieces_per_piece + piece.begin // _REQUEST_SIZE
+            off = idx * _REQUEST_SIZE
+            self.data_file_mmap[off : off + len(piece.block)] = piece.block
+            self.data_file_mmap.flush()
+            self.sub_pieces[idx] = True
+            sub_pieces_range = range(
+                piece.index * self.sub_pieces_per_piece,
+                min(
+                    (piece.index + 1) * self.sub_pieces_per_piece, len(self.sub_pieces)
+                ),
+            )
+            if all(map(lambda i: self.sub_pieces[i], sub_pieces_range)):
+                offset = self.metadata.piece_len * piece.index
+                end = min(offset + self.metadata.piece_len, self.metadata.total_len)
+                has_part = (
+                    hashlib.sha1(self.data_file_mmap[offset:end]).digest()
+                    == self.metadata.pieces[piece.index]
+                )
+                if has_part:
+                    self.data_file_mmap.flush()
+                    self.bitfield[piece.index] = True
+                    with self.peers_lock:
+                        for p in self.peers.values():
+                            self.executor.submit(p.on_have_piece, piece.index)
+                else:
+                    for i in sub_pieces_range:
+                        self.sub_pieces[i] = False
+        self.on_sub_piece(self, idx)
 
     def _handle_request(self, request: Request) -> Optional[bytes]:
-        # TODO(firelion)
-        return ...
+        if request.begin + request.length > self.metadata.piece_len or request.length <= 0 or request.begin < 0 or request.length > _REQUEST_SIZE * 2:
+            warning(RuntimeWarning(f"Illegal request {request}"))
+            return None
+        begin = request.index * self.metadata.piece_len + request.begin
+        end = begin + request.length
+        if end > self.metadata.total_len:
+            warning(RuntimeWarning(f"Out of range request {request}"))
+            return None
         
+        with self.file_lock:
+            if not self.bitfield[request.index]:
+                return None
+            
+            return self.data_file_mmap[begin:end]
+        
+    def request_block(self, piece_idx: int, block_idx: int) -> None:
+        size = min(
+            self.metadata.total_len
+            - (piece_idx * self.sub_pieces_per_piece + block_idx) * _REQUEST_SIZE,
+            _REQUEST_SIZE,
+        )
+        msg = Request(piece_idx, block_idx * _REQUEST_SIZE, size)
+        while True:
+            with self.peers_lock:
+                ps = [p for p in self.peers.values() if p.peer_has_piece(piece_idx) and p.may_request()]
+                if len(ps) > 0:
+                    p = random.choice(ps)
+                    p.send_msg(msg)
+                    return
+
+            time.sleep(_SYNC_INTERVAL)
+
     def connect_to_peer(self, peer: tuple[str, int]) -> None:
         def connect() -> socket.socket:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -529,16 +645,22 @@ class Peer:
             return sock
         self._connect_to_peer(peer, connect, is_initiator=True)
 
-    def _connect_to_peer(self, peer: tuple[str, int], make_sock: Callable[[], socket.socket], is_initiator: bool) -> None:
-        msg = Bitfield(Bitset(len(self.metadata.pieces)))
+    def try_connect_to_peer(self, peer: tuple[str, int]) -> bool:
+        try:
+            self.connect_to_peer(peer)
+            return True
+        except Exception as e:
+            warning(e)
+            return False
 
+    def _connect_to_peer(self, peer: tuple[str, int], make_sock: Callable[[], socket.socket], is_initiator: bool) -> None:
         with self.peers_lock:
             if peer in self.peers:
                 return
             sock = make_sock()
             conn = PeerConnection(
                 self.id,
-                self.metadata.info_hash,
+                self.metadata,
                 sock,
                 is_initiator=is_initiator,
                 handle_piece=self._handle_piece,
@@ -546,7 +668,7 @@ class Peer:
                 on_disconnected=self._on_disconnected,
             )
             self.peers[peer] = conn
-            conn.send_msg(msg)
+            conn.send_msg(Bitfield(Bitset(self.bitfield)))
 
     def _on_disconnected(self, connection: PeerConnection, addr: tuple[str, int]) -> None:
         with self.peers_lock:
@@ -554,22 +676,54 @@ class Peer:
                 connection = self.peers.pop(addr)
                 self.executor.submit(lambda: connection.close())
 
+    def __accept_job(self) -> None:
+        self.listen_socket.listen()
+        try:
+            while True:
+                sock, peer = self.listen_socket.accept()
+                with self.peers_lock:
+                    if len(self.peers) >= _MAX_PEERS:
+                        sock.shutdown()
+                        sock.close()
+                        sock = None
+                
+                if sock is None:
+                    time.sleep(_SYNC_INTERVAL)
+                    continue
+
+                print(f"incoming {peer}")
+                def action():
+                    self._connect_to_peer(peer, lambda: sock, is_initiator=False)
+                    self.peers[peer].unchoke()
+                self.executor.submit(action)
+        except IOError:
+            ...
+
     def close(self) -> None:
-        # TODO(firelion) close listen socket and thread
-        ...
+        self.listen_socket.close()
 
         with self.peers_lock:
             for p in self.peers.values():
-                p.close()
+                try:
+                    p.close()
+                except:
+                    ...
             self.peers.clear()
 
-        # TODO(firelion) close file
-        ...
+        with self.file_lock:
+            self.data_file_mmap.close()
+            self.data_file.close()
 
         self.executor.shutdown()
+        self.accept_thread.join()
 
     def __enter__(self):
-        self.announce_peers(event="started")
+        try:
+            self.announce_peers(event="started")
+        except:
+            self.close()
+            raise
+
         return self
 
     def __exit__(self, exc_type, exc_value, exc_traceback):
@@ -584,8 +738,76 @@ if __name__ == "__main__":
     # - token --- токен из бота (без каких-либо дополнительных преобразований)
     # Как только вы убедитесь, что баллы засчитаны --- уберите передачу заголовков, больше они не понадобятся  
     meta = metafile.TorrentMetadata.parse(
-        pathlib.Path("data/practice1.torrent").read_bytes()
+        pathlib.Path("data/image.jpg.torrent").read_bytes()
     )
 
-    peer = Peer(pathlib.Path("data"), meta, id=b"-qB5100-.fsanoifneawolcasdaw"[0:20])
-    peer.announce_peers()
+    block_idx = 0
+    received_parts = 0
+    next_lock = threading.Lock()
+    cond = threading.Condition(next_lock)
+
+    def request_next(peer: Peer, idx: int) -> None:
+        global block_idx
+        global received_parts
+        global next_lock
+        global cond
+        with next_lock:
+            if idx >= 0:
+                received_parts += 1
+                if received_parts == len(peer.sub_pieces):
+                    cond.notify()
+            if block_idx == -1:
+                if received_parts == len(peer.sub_pieces):
+                    cond.notify()
+                return
+
+            peer.request_block(
+                block_idx // peer.sub_pieces_per_piece,
+                block_idx % peer.sub_pieces_per_piece,
+            )
+            block_idx += 1
+            if block_idx == len(peer.sub_pieces):
+                block_idx = -1
+
+    with Peer(
+        pathlib.Path("data"),
+        meta,
+        id=..., #TODO: выберете случайный 20-байтный id,
+        on_sub_piece=request_next,
+    ) as peer:
+        while block_idx != -1 and peer.sub_pieces[block_idx]:
+            received_parts += 1
+            block_idx += 1
+            if block_idx == len(peer.sub_pieces):
+                block_idx = -1
+
+        has_whole_file = received_parts == len(peer.sub_pieces)
+
+        for p in peer.known_peers:
+            print(f"Connecting to {p}")
+            if peer.try_connect_to_peer(p):
+                peer.peers[p].unchoke()
+                if not has_whole_file: 
+                    peer.peers[p].interested()
+                print("Connected")
+            else:
+                print("Failed")
+
+        time.sleep(3)
+        request_next(peer, -1)
+        request_next(peer, -1)
+        request_next(peer, -1)
+
+        if not has_whole_file:
+            with next_lock:
+                cond.wait()
+
+        print("File downloaded")
+
+        try:
+            while True:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            ...
+        
+        print("shutting down...")
